@@ -32,7 +32,8 @@ PREFERRED_RUNWAYS = {
     'ENTC': '18',
     'ENKR': '23',
     'ENSH': '36',
-    'ENDU': '28'
+    'ENDU': '28',
+    'ENMS': '33'
 }
 
 # Airports to ignore
