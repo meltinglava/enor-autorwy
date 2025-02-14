@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import requests
 import math
 import re
@@ -7,18 +9,14 @@ import os
 import json
 from dataclasses import dataclass
 from airport_config import PREFERRED_RUNWAYS, IGNORED_AIRPORTS
+import termcolor
 
-# ANSI color codes
-class Colors:
-    HEADER = '\033[95m'     # Purple
-    BLUE = '\033[94m'       # Blue
-    GREEN = '\033[92m'      # Green
-    YELLOW = '\033[93m'     # Yellow
-    RED = '\033[91m'        # Red
-    ENDC = '\033[0m'        # Reset color
-    BOLD = '\033[1m'        # Bold
+# Helper function for colored text using termcolor
+def c(text: str, color: str, attrs: List[str] = None) -> str:
+    return termcolor.colored(text, color, attrs=attrs)
 
-class Runway:
+class Airport:
+    """Class to store runway data for an airport."""
     def __init__(self, rwy1: str, rwy2: str, hdg1: int, hdg2: int, airport: str):
         self.rwy1 = rwy1
         self.rwy2 = rwy2
@@ -26,7 +24,7 @@ class Runway:
         self.hdg2 = hdg2
         self.airport = airport
 
-def parse_runways(filename: str) -> Dict[str, List[Runway]]:
+def parse_runways(filename: str) -> Dict[str, List[Airport]]:
     runways = {}
     with open(filename, 'r') as f:
         for line in f:
@@ -34,7 +32,8 @@ def parse_runways(filename: str) -> Dict[str, List[Runway]]:
                 parts = line.strip().split()
                 if len(parts) >= 9:
                     airport = parts[8]
-                    runway = Runway(parts[0], parts[1], int(parts[2]), int(parts[3]), airport)
+                    # Note: The Airport __init__ now expects 5 arguments.
+                    runway = Airport(parts[0], parts[1], int(parts[2]), int(parts[3]), airport)
                     if airport not in runways:
                         runways[airport] = []
                     runways[airport].append(runway)
@@ -42,10 +41,10 @@ def parse_runways(filename: str) -> Dict[str, List[Runway]]:
 
 def parse_metar(metar: str) -> dict:
     """Parse METAR string to extract wind information.
-    
+
     Args:
         metar: Raw METAR string
-        
+
     Returns:
         Dictionary containing:
         - direction: wind direction in degrees or 'VRB' for variable
@@ -56,15 +55,15 @@ def parse_metar(metar: str) -> dict:
         - has_rvr: True if RVR is reported
         - has_snow: True if snow is reported
         - low_clouds: True if BKN or OVC at or below 200ft
-        Returns None if parsing fails
+
+    Returns None if parsing fails.
     """
     try:
         parts = metar.split()
         wind_data = {'raw_metar': metar}
-        
+
         # Find wind information
-        wind_found = False
-        for i, part in enumerate(parts):
+        for part in parts:
             if 'KT' in part and not part.startswith('Q'):
                 if part.startswith('VRB'):
                     wind_data['direction'] = 'VRB'
@@ -72,56 +71,53 @@ def parse_metar(metar: str) -> dict:
                 else:
                     wind_data['direction'] = int(part[0:3])
                     wind_data['speed'] = int(part[3:5])
-                wind_found = True
-                # Remove check for variable wind range since we want to use the primary direction
                 break
-        
-        # Extract visibility - look for it after the wind part
+
+        # Extract visibility (look for it after the wind part)
         for i, part in enumerate(parts):
-            if 'KT' in part:  # Find the wind part
-                # Look at the next part for visibility
+            if 'KT' in part:
                 if i + 1 < len(parts):
                     next_part = parts[i + 1]
-                    if next_part.isdigit():  # Pure digits = visibility
+                    if next_part.isdigit():
                         wind_data['visibility'] = int(next_part)
                     elif next_part == '9999':
                         wind_data['visibility'] = 9999
                 break
-        
+
         # Check for RVR (R followed by runway number)
         wind_data['has_rvr'] = any(p.startswith('R') and len(p) > 3 and p[1:3].isdigit() for p in parts)
-        
+
         # Extract temperature
         for part in parts:
             if '/' in part and not part.startswith('Q'):
                 temp_str = part.split('/')[0]
-                if temp_str.startswith('M'):  # Negative temperature
+                if temp_str.startswith('M'):
                     wind_data['temperature'] = -int(temp_str[1:])
                 else:
                     try:
                         wind_data['temperature'] = int(temp_str)
                     except ValueError:
-                        continue  # Skip if not a valid temperature
+                        continue
                 break
-        
+
         # Check for snow conditions
         snow_conditions = {'SN', 'SNRA', 'SHSN', 'RASN', '-SN', '+SN'}
         wind_data['has_snow'] = any(cond in parts for cond in snow_conditions)
-        
+
         # Check for low cloud layers (BKN or OVC at or below 200ft)
         wind_data['low_clouds'] = False
         for part in parts:
             if part.startswith(('BKN', 'OVC')):
                 try:
-                    height = int(part[3:6])  # Extract the height in hundreds of feet
-                    if height <= 2:  # 200 feet or below
+                    height = int(part[3:6])
+                    if height <= 2:
                         wind_data['low_clouds'] = True
                         break
                 except ValueError:
                     continue
-        
+
         return wind_data if 'direction' in wind_data and 'speed' in wind_data else None
-        
+
     except Exception as e:
         print(f"Error parsing METAR: {e}")
         return None
@@ -138,7 +134,7 @@ def get_all_metars() -> Dict[str, dict]:
                 wind_data = parse_metar(metar)
                 if wind_data:
                     metars[icao] = wind_data
-        
+
         # Get ESKS METAR separately
         response = requests.get('https://metar.vatsim.net/metar.php?id=ESKS')
         if response.status_code == 200:
@@ -146,102 +142,102 @@ def get_all_metars() -> Dict[str, dict]:
             wind_data = parse_metar(metar)
             if wind_data:
                 metars['ESKS'] = wind_data
-                
+
     except Exception as e:
         print(f"Error fetching METARs: {e}")
-    
+
     return metars
 
 def calculate_wind_components(runway_hdg: int, wind_dir: int | str, wind_speed: int) -> Tuple[float, float]:
     try:
         # Handle variable winds
         if isinstance(wind_dir, str) and wind_dir == 'VRB':
-            return 0, wind_speed  # Assume maximum crosswind for variable winds
-            
-        # Calculate the relative wind angle
-        # Normalize the difference between wind direction and runway heading to -180 to +180
+            return 0, wind_speed
+
+        # Normalize relative angle to -180...+180 degrees
         relative_angle = ((wind_dir - runway_hdg + 180 + 360) % 360) - 180
-        
-        # Calculate headwind (positive is headwind, negative is tailwind)
-        # Use cosine of the relative angle - this gives positive for headwind (wind from ahead)
-        # and negative for tailwind (wind from behind)
+
         headwind = wind_speed * math.cos(math.radians(relative_angle))
-        
-        # Calculate crosswind (absolute value)
-        # Use sine of the relative angle - the absolute value gives the crosswind magnitude
         crosswind = abs(wind_speed * math.sin(math.radians(relative_angle)))
-        
+
         return headwind, crosswind
-        
+
     except Exception as e:
         print(f"Error calculating wind components: {e}")
         return 0, 0
 
+def format_wind_info(direction: str, speed: Union[int, str]) -> str:
+    """Return formatted wind info with color using termcolor."""
+    try:
+        speed_int = int(speed) if isinstance(speed, str) else speed
+        if direction == 'VRB':
+            return c(f"VRB{speed_int:02d}KT", "green")
+        else:
+            color = "green" if speed_int < 10 else "yellow" if speed_int < 20 else "red"
+            return c(f"{direction:03d}@{speed_int:02d}KT", color)
+    except (ValueError, TypeError):
+        return c(f"{direction}@{speed}KT", "yellow")
+
 def select_runway_enzv(wind_data: dict) -> Tuple[str, str, bool]:
-    """Special case handler for ENZV which has two runway pairs.
-    Prioritizes 18/36 runway pair and only uses 10/28 when crosswind on 18/36 exceeds 15KT."""
+    """Special case for ENZV which has two runway pairs."""
     if not wind_data or wind_data['speed'] == 0:
         return '18', "Calm winds - using preferred runway 18", True
-        
+
     if wind_data.get('direction') == 'VRB':
         return '18', f"Variable winds {wind_data['speed']}KT - using preferred runway 18", True
-        
+
     try:
         wind_dir = int(wind_data['direction'])
         wind_speed = int(wind_data['speed'])
         wind_info = format_wind_info(str(wind_dir), wind_speed)
-        
+
         # First check 18/36 pair
         rwy18_hw, rwy18_xw = calculate_wind_components(177, wind_dir, wind_speed)
         rwy36_hw, rwy36_xw = calculate_wind_components(357, wind_dir, wind_speed)
-        
-        # Select best runway from 18/36 pair
+
         if rwy18_hw > rwy36_hw:
             best_primary = ('18', rwy18_xw, rwy18_hw)
         else:
             best_primary = ('36', rwy36_xw, rwy36_hw)
-            
-        # If crosswind on primary runway pair is acceptable, use it
+
         if best_primary[1] <= 15:
             rwy = best_primary[0]
-            if best_primary[1] > 10:  # Only show crosswind info if it's significant
-                message = f"Selected runway {Colors.BLUE}{rwy}{Colors.ENDC} (crosswind: {Colors.YELLOW}{best_primary[1]:.0f}KT{Colors.ENDC}) with {wind_info}"
+            if best_primary[1] > 10:
+                message = "Selected runway " + c(rwy, "blue") + " (crosswind: " + c(f"{best_primary[1]:.0f}KT", "yellow") + ") with " + wind_info
             else:
-                message = f"Selected runway {Colors.BLUE}{rwy}{Colors.ENDC} with {wind_info}"
+                message = "Selected runway " + c(rwy, "blue") + " with " + wind_info
             return rwy, message, True
-            
-        # If we get here, check 10/28 pair as crosswind on 18/36 is too high
+
+        # Check secondary runway pair 10/28
         rwy10_hw, rwy10_xw = calculate_wind_components(104, wind_dir, wind_speed)
         rwy28_hw, rwy28_xw = calculate_wind_components(284, wind_dir, wind_speed)
-        
-        # Select best runway from 10/28 pair
+
         if rwy10_hw > rwy28_hw:
             best_secondary = ('10', rwy10_xw, rwy10_hw)
         else:
             best_secondary = ('28', rwy28_xw, rwy28_hw)
-            
-        # Use the secondary runway
-        message = f"High crosswind on 18/36 ({best_primary[1]:.0f}KT) - selected runway {Colors.BLUE}{best_secondary[0]}{Colors.ENDC}"
-        if best_secondary[1] > 10:  # Add crosswind info if significant
-            message += f" (crosswind: {Colors.YELLOW}{best_secondary[1]:.0f}KT{Colors.ENDC})"
-        message += f" with {wind_info}"
-        
+
+        message = "High crosswind on 18/36 (" + c(f"{best_primary[1]:.0f}KT", "red") + ") - selected runway " + c(best_secondary[0], "blue")
+        if best_secondary[1] > 10:
+            message += " (crosswind: " + c(f"{best_secondary[1]:.0f}KT", "yellow") + ")"
+        message += " with " + wind_info
+
         return best_secondary[0], message, True
-        
+
     except Exception as e:
         return '18', f"Error calculating runway ({e}) - using preferred runway 18", True
 
-def handle_variable_winds(airport: str, runway_data: List[Runway], wind_speed: int) -> Tuple[str, str]:
+def handle_variable_winds(airport: str, runway_data: List[Airport], wind_speed: int) -> Tuple[str, str]:
     """Handle variable wind conditions for any airport."""
     if airport in PREFERRED_RUNWAYS:
         selected = PREFERRED_RUNWAYS[airport]
-        return selected, f"{Colors.YELLOW}Wind VRB{wind_speed}KT{Colors.ENDC} - using preferred runway {Colors.BLUE}{selected}{Colors.ENDC}"
+        return selected, c(f"Wind VRB{wind_speed}KT", "yellow") + " - using preferred runway " + c(selected, "blue")
     else:
         selected = runway_data[0].rwy1
-        return selected, f"{Colors.YELLOW}Wind VRB{wind_speed}KT{Colors.ENDC} - defaulting to runway {Colors.BLUE}{selected}{Colors.ENDC}"
+        return selected, c(f"Wind VRB{wind_speed}KT", "yellow") + " - defaulting to runway " + c(selected, "blue")
 
 def check_engm_conditions(wind_data: dict) -> List[str]:
-    """Check all conditions that require manual selection at ENGM."""
+    """Check conditions that require manual selection at ENGM."""
     conditions = []
     checks = [
         ('direction', 'VRB', "Variable winds"),
@@ -252,12 +248,11 @@ def check_engm_conditions(wind_data: dict) -> List[str]:
         ('has_snow', True, "Snow reported"),
         ('low_clouds', True, "Low cloud layer (200ft or below)")
     ]
-    
+
     for key, check, message in checks:
         value = wind_data.get(key)
         if value is None:
             continue
-            
         if callable(check):
             if check(value):
                 msg = message(value) if callable(message) else message
@@ -266,120 +261,106 @@ def check_engm_conditions(wind_data: dict) -> List[str]:
             conditions.append(message)
         elif value == check:
             conditions.append(message)
-    
+
     return conditions
 
-def select_runway(airport: str, runway_data: List[Runway], wind_data: dict) -> Tuple[Union[str, List[str]], str, bool, str]:
+def select_runway(airport: str, runway_data: List[Airport], wind_data: dict) -> Tuple[Union[str, List[str]], str, bool, str]:
     message = ""
     should_print = False
-    mode = ""  # Initialize mode
-    
+    mode = ""
+
     if not wind_data:
         selected = PREFERRED_RUNWAYS.get(airport, runway_data[0].rwy1)
-        message = f"No wind data available - {'using preferred runway' if airport in PREFERRED_RUNWAYS else 'defaulting to runway'} {Colors.BLUE}{selected}{Colors.ENDC}"
+        message = "No wind data available - " + ("using preferred runway" if airport in PREFERRED_RUNWAYS else "defaulting to runway") + " " + c(selected, "blue")
         return selected, message, True, mode
-    
-    # Handle calm winds (0 knots)
+
     if wind_data['speed'] == 0:
         selected = PREFERRED_RUNWAYS.get(airport, runway_data[0].rwy1)
-        message = f"{Colors.GREEN}Calm winds{Colors.ENDC} - {'using preferred runway' if airport in PREFERRED_RUNWAYS else 'defaulting to runway'} {Colors.BLUE}{selected}{Colors.ENDC}"
+        message = c("Calm winds", "green") + " - " + ("using preferred runway" if airport in PREFERRED_RUNWAYS else "defaulting to runway") + " " + c(selected, "blue")
         return selected, message, True, mode
-    
-    # Special case for ENGM
+
     if airport == 'ENGM':
-        # Show current conditions if any
         conditions = check_engm_conditions(wind_data)
         if conditions:
-            print(f"\n{Colors.HEADER}ENGM current conditions:{Colors.ENDC} {wind_data['raw_metar']}")
-            print(f"\n{Colors.YELLOW}Conditions requiring manual selection:{Colors.ENDC}")
+            print("\n" + c("ENGM current conditions:", "magenta", attrs=["bold"]) + " " + wind_data['raw_metar'])
+            print("\n" + c("Conditions requiring manual selection:", "yellow"))
             for condition in conditions:
                 print(f"- {condition}")
-            # Force manual selection when conditions are detected
             runways, mode = get_engm_config()
-            message = f"Manual selection required due to conditions. Using {Colors.BLUE}{mode}{Colors.ENDC} mode with runways {Colors.GREEN}{', '.join(runways)}{Colors.ENDC}"
+            message = "Manual selection required due to conditions. Using " + c(mode, "blue") + " mode with runways " + c(", ".join(runways), "green")
             return runways, message, True, mode
-        
-        # Always show wind information for ENGM
+
         if wind_data.get('direction') != 'VRB':
             try:
                 wind_dir = int(wind_data['direction'])
                 wind_speed = int(wind_data['speed'])
-                
+
                 rwy01_hw = wind_speed * math.cos(math.radians(wind_dir - 7))
                 rwy19_hw = wind_speed * math.cos(math.radians(wind_dir - 187))
-                
+
                 suggested_rwy = "01" if rwy01_hw > rwy19_hw else "19"
-                print(f"\nBased on {format_wind_info(str(wind_dir), wind_speed)}:")
-                print(f"Runway {Colors.BLUE}01{Colors.ENDC}: {abs(rwy01_hw):.1f}KT {'head' if rwy01_hw > 0 else 'tail'}wind")
-                print(f"Runway {Colors.BLUE}19{Colors.ENDC}: {abs(rwy19_hw):.1f}KT {'head' if rwy19_hw > 0 else 'tail'}wind")
-                print(f"Suggested configuration: Runway {Colors.GREEN}{suggested_rwy}{Colors.ENDC}")
+                print("\nBased on " + format_wind_info(str(wind_dir), wind_speed) + ":")
+                print("Runway " + c("01", "blue") + ": " + f"{abs(rwy01_hw):.1f}KT " + ("head" if rwy01_hw > 0 else "tail") + "wind")
+                print("Runway " + c("19", "blue") + ": " + f"{abs(rwy19_hw):.1f}KT " + ("head" if rwy19_hw > 0 else "tail") + "wind")
+                print("Suggested configuration: Runway " + c(suggested_rwy, "green"))
             except (ValueError, TypeError) as e:
-                print(f"{Colors.RED}Could not calculate wind components: {e}{Colors.ENDC}")
-        
-        # Get ENGM configuration if variable winds
+                print(c(f"Could not calculate wind components: {e}", "red"))
+
         if wind_data.get('direction') == 'VRB':
             runways, mode = get_engm_config()
-            message = f"Variable winds - manual selection required. Using {Colors.BLUE}{mode}{Colors.ENDC} mode with runways {Colors.GREEN}{', '.join(runways)}{Colors.ENDC}"
+            message = "Variable winds - manual selection required. Using " + c(mode, "blue") + " mode with runways " + c(", ".join(runways), "green")
             return runways, message, True, mode
-    
-    # Handle variable winds for other airports
+
     if wind_data.get('direction') == 'VRB':
         selected, message = handle_variable_winds(airport, runway_data, wind_data['speed'])
         return selected, message, True, mode
-    
-    # For all other airports, find runway with best wind components
+
     best_runway = None
-    best_score = float('-inf')  # Higher score is better
+    best_score = float('-inf')
     min_crosswind = float('inf')
     wind_info = format_wind_info(str(wind_data['direction']), wind_data['speed'])
-    
+
     try:
         wind_dir = int(wind_data['direction'])
         wind_speed = int(wind_data['speed'])
-        
+
         for runway in runway_data:
             for rwy, hdg in [(runway.rwy1, runway.hdg1), (runway.rwy2, runway.hdg2)]:
                 hw, xw = calculate_wind_components(hdg, wind_dir, wind_speed)
-                # Score formula: prioritize headwind heavily over crosswind
-                # Heavily penalize tailwind (negative headwind)
-                # This ensures we always prefer a runway with headwind over one with tailwind
-                score = hw - (xw / 2)  # Headwind is twice as important as crosswind
-                
+                score = hw - (xw / 2)
+
                 if score > best_score or (score == best_score and xw < min_crosswind):
                     best_score = score
                     min_crosswind = xw
                     best_runway = rwy
                     best_headwind = hw
-        
-        # Show message for moderate and high crosswind conditions
+
         if min_crosswind > 20:
-            message = f"{Colors.RED}High crosswind conditions{Colors.ENDC} - selected runway {Colors.BLUE}{best_runway}{Colors.ENDC} (crosswind: {Colors.RED}{min_crosswind:.0f}KT{Colors.ENDC}) with {wind_info}"
+            message = c("High crosswind conditions", "red") + " - selected runway " + c(best_runway, "blue") + " (crosswind: " + c(f"{min_crosswind:.0f}KT", "red") + ") with " + wind_info
             should_print = True
         elif min_crosswind > 15:
-            message = f"{Colors.YELLOW}Moderate crosswind{Colors.ENDC} - selected runway {Colors.BLUE}{best_runway}{Colors.ENDC} (crosswind: {Colors.YELLOW}{min_crosswind:.0f}KT{Colors.ENDC}) with {wind_info}"
+            message = c("Moderate crosswind", "yellow") + " - selected runway " + c(best_runway, "blue") + " (crosswind: " + c(f"{min_crosswind:.0f}KT", "yellow") + ") with " + wind_info
             should_print = True
         else:
-            message = f"Selected runway {Colors.BLUE}{best_runway}{Colors.ENDC} with {wind_info}"
+            message = "Selected runway " + c(best_runway, "blue") + " with " + wind_info
             should_print = False
-        
+
     except (ValueError, TypeError) as e:
-        # Fallback to default runway if wind calculations fail
         best_runway = PREFERRED_RUNWAYS.get(airport, runway_data[0].rwy1)
-        message = f"{Colors.RED}Error calculating wind components{Colors.ENDC} - {'using preferred runway' if airport in PREFERRED_RUNWAYS else 'defaulting to runway'} {Colors.BLUE}{best_runway}{Colors.ENDC}"
+        message = c("Error calculating wind components", "red") + " - " + ("using preferred runway" if airport in PREFERRED_RUNWAYS else "defaulting to runway") + " " + c(best_runway, "blue")
         should_print = True
-    
+
     return best_runway, message, should_print, mode
 
 def get_engm_config() -> Tuple[List[str], str]:
-    """Get ENGM runway configuration from user input."""
-    print(f"\n{Colors.HEADER}ENGM Runway Configuration:{Colors.ENDC}")
-    print(f"1. {Colors.BLUE}19 MPO{Colors.ENDC} (Mixed Parallel Operations)")
-    print(f"2. {Colors.BLUE}01 MPO{Colors.ENDC} (Mixed Parallel Operations)")
-    print(f"3. {Colors.YELLOW}19 SPO{Colors.ENDC} (Segregated Parallel Operations - 19L DEP, 19R ARR)")
-    print(f"4. {Colors.YELLOW}01 SPO{Colors.ENDC} (Segregated Parallel Operations - 01L DEP, 01R ARR)")
-    print(f"5. {Colors.GREEN}19 SRO{Colors.ENDC} (Single Runway Operations - 19R)")
-    print(f"6. {Colors.GREEN}01 SRO{Colors.ENDC} (Single Runway Operations - 01L)")
-    
+    print("\n" + c("ENGM Runway Configuration:", "magenta", attrs=["bold"]))
+    print("1. " + c("19 MPO", "blue") + " (Mixed Parallel Operations)")
+    print("2. " + c("01 MPO", "blue") + " (Mixed Parallel Operations)")
+    print("3. " + c("19 SPO", "yellow") + " (Segregated Parallel Operations - 19L DEP, 19R ARR)")
+    print("4. " + c("01 SPO", "yellow") + " (Segregated Parallel Operations - 01L DEP, 01R ARR)")
+    print("5. " + c("19 SRO", "green") + " (Single Runway Operations - 19R)")
+    print("6. " + c("01 SRO", "green") + " (Single Runway Operations - 01L)")
+
     while True:
         try:
             choice = int(input("Select runway configuration (1-6): "))
@@ -399,47 +380,35 @@ def get_engm_config() -> Tuple[List[str], str]:
         print("Invalid choice. Please enter a number between 1 and 6.")
 
 def update_engm_runways(filename: str, runways: List[str], mode: str):
-    """Update ENGM runway configuration based on mode.
-    
-    Operation types:
-    1 = Departure
-    0 = Arrival
-    Not in file = Inactive
-    """
-    # Read the file
+    """Update ENGM runway configuration based on mode."""
     with open(filename, 'r') as f:
         lines = f.readlines()
-    
-    # Remove existing ENGM entries
+
     updated_lines = [line for line in lines if not (
-        line.startswith('ACTIVE_RUNWAY:ENGM:') or 
-        line.startswith('ENGM_ARR') or 
+        line.startswith('ACTIVE_RUNWAY:ENGM:') or
+        line.startswith('ENGM_ARR') or
         line.startswith('ENGM_DEP')
     )]
-    
+
     if mode == "MPO":
-        # Both runways active for both operations
         for runway in runways:
             updated_lines.extend([
-                f'ACTIVE_RUNWAY:ENGM:{runway}:1\n',  # DEP
-                f'ACTIVE_RUNWAY:ENGM:{runway}:0\n'   # ARR
+                f'ACTIVE_RUNWAY:ENGM:{runway}:1\n',
+                f'ACTIVE_RUNWAY:ENGM:{runway}:0\n'
             ])
     elif mode == "SPO":
-        # 19L/01L for departures, 19R/01R for arrivals
-        dep_rwy = runways[0]  # 19L/01L
-        arr_rwy = runways[1]  # 19R/01R
+        dep_rwy = runways[0]
+        arr_rwy = runways[1]
         updated_lines.extend([
-            f'ACTIVE_RUNWAY:ENGM:{dep_rwy}:1\n',  # Left runway DEP only
-            f'ACTIVE_RUNWAY:ENGM:{arr_rwy}:0\n'   # Right runway ARR only
+            f'ACTIVE_RUNWAY:ENGM:{dep_rwy}:1\n',
+            f'ACTIVE_RUNWAY:ENGM:{arr_rwy}:0\n'
         ])
     else:  # SRO
-        # Single runway for both operations
         updated_lines.extend([
-            f'ACTIVE_RUNWAY:ENGM:{runways[0]}:1\n',  # DEP
-            f'ACTIVE_RUNWAY:ENGM:{runways[0]}:0\n'   # ARR
+            f'ACTIVE_RUNWAY:ENGM:{runways[0]}:1\n',
+            f'ACTIVE_RUNWAY:ENGM:{runways[0]}:0\n'
         ])
-    
-    # Write back to file
+
     with open(filename, 'w') as f:
         f.writelines(updated_lines)
 
@@ -447,7 +416,6 @@ def update_rwy_file(filename: str, airport: str, runway: str):
     """Update runway file with new active runway configuration."""
     with open(filename, 'r+') as f:
         lines = [line for line in f.readlines() if not line.startswith(f'ACTIVE_RUNWAY:{airport}:')]
-        # Add new active runway for both departure (1) and arrival (0)
         lines.extend([
             f'ACTIVE_RUNWAY:{airport}:{runway}:1\n',
             f'ACTIVE_RUNWAY:{airport}:{runway}:0\n'
@@ -456,94 +424,76 @@ def update_rwy_file(filename: str, airport: str, runway: str):
         f.writelines(lines)
         f.truncate()
 
-def format_wind_info(direction: str, speed: Union[int, str]) -> str:
-    """Format wind information with color based on wind speed."""
-    try:
-        speed_int = int(speed) if isinstance(speed, str) else speed
-        if direction == 'VRB':
-            return f"{Colors.GREEN}VRB{speed_int:02d}KT{Colors.ENDC}"
-        else:
-            color = (Colors.GREEN if speed_int < 10 else
-                    Colors.YELLOW if speed_int < 20 else
-                    Colors.RED)
-            return f"{color}{direction:03d}@{speed_int:02d}KT{Colors.ENDC}"
-    except (ValueError, TypeError):
-        # Fallback for any parsing errors
-        return f"{Colors.YELLOW}{direction}@{speed}KT{Colors.ENDC}"
-
 def main():
     try:
         # Get METARs for all airports
         all_metars = get_all_metars()
-        
+
         # Parse runway data
         runways = parse_runways('runway.txt')
-        
+
         # Get list of .rwy files in current directory
-        rwy_files = []
-        for file in os.listdir():
-            if file.endswith('.rwy'):
-                rwy_files.append(file)
-        
+        rwy_files = [file for file in os.listdir() if file.endswith('.rwy')]
+
         if not rwy_files:
             print("No .rwy files found in current directory")
             return
-        
+
         print("Updating Runways...")
         print("-" * 50)
-        
+
         airports_without_data = []
-        
-        # Always process ENGM first if it exists in runways
+
+        # Process ENGM first
         if 'ENGM' in runways:
-            wind_data = all_metars.get('ENGM', {})  # Get ENGM weather data, empty dict if none
+            wind_data = all_metars.get('ENGM', {})
             selected_runway, message, should_print, mode = select_runway('ENGM', runways['ENGM'], wind_data)
-            if mode:  # Only update if we got a mode back
+            if mode:
                 for rwy_file in rwy_files:
                     update_engm_runways(rwy_file, selected_runway, mode)
             if should_print:
-                print(f"ENGM: {message}")
-                print("-" * 50)  # Separator after ENGM configuration
-        
+                print("ENGM: " + message)
+                print("-" * 50)
+
         # Then process ENZV
         if 'ENZV' in all_metars:
             selected_runway, message, _ = select_runway_enzv(all_metars['ENZV'])
             for rwy_file in rwy_files:
                 update_rwy_file(rwy_file, 'ENZV', selected_runway)
-            print(f"ENZV: {message}")
+            print("ENZV: " + message)
         else:
             airports_without_data.append('ENZV')
-        
+
         # Process other airports
         for airport in runways:
-            if airport in ['ENZV', 'ENGM'] or airport in IGNORED_AIRPORTS:  # Skip already processed airports
+            if airport in ['ENZV', 'ENGM'] or airport in IGNORED_AIRPORTS:
                 continue
-                
+
             wind_data = all_metars.get(airport)
             if not wind_data:
                 airports_without_data.append(airport)
                 continue
-            
+
             selected_runway, message, should_print, mode = select_runway(airport, runways[airport], wind_data)
             for rwy_file in rwy_files:
                 update_rwy_file(rwy_file, airport, selected_runway)
             if should_print:
-                print(f"{airport}: {message}")
-        
+                print(airport + ": " + message)
+
         if airports_without_data:
-            print(f"\n{Colors.YELLOW}No METAR data available for: {', '.join(airports_without_data)}{Colors.ENDC}")
-        
-        print("-" * 50)    
+            print("\n" + c("No METAR data available for: " + ", ".join(airports_without_data), "yellow"))
+
+        print("-" * 50)
         print("Runway update complete!")
-        
+
     except Exception as e:
-        print(f"{Colors.RED}An error occurred: {str(e)}{Colors.ENDC}")
-        raise  # Re-raise the exception to show the full traceback
+        print(c(f"An error occurred: {str(e)}", "red"))
+        raise
 
 if __name__ == "__main__":
     try:
         main()
-        input("\nPress Enter to exit...")  # Add pause before exit
+        input("\nPress Enter to exit...")
     except Exception as e:
-        print(f"{Colors.RED}Error: {str(e)}{Colors.ENDC}")
-        input("\nPress Enter to exit...")  # Add pause on error too
+        print(c(f"Error: {str(e)}", "red"))
+        input("\nPress Enter to exit...")
