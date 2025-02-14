@@ -1,14 +1,7 @@
 # ENOR Runway Selector
 
-Automatic runway selector for Norwegian airports based on METAR data from VATSIM. Helps air traffic controllers by selecting optimal runways based on current weather conditions.
-
-## Features
-
-- 🌍 Real-time METAR data from VATSIM
-- 🛫 Automatic runway selection based on wind
-- 🌪️ Handling of variable winds
-- 📋 Predefined preferred runways for calm conditions
-- 🎨 Color-coded output for better readability
+Automatic runway selector for Norwegian airports based on METAR data from VATSIM. 
+Helps controllers by selecting optimal runways based on current weather conditions.
 
 ## Requirements
 
