@@ -12,11 +12,14 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+> [!TIP]
+> Dependency is automatically installed using the provided bat file
+
 ## Usage
 
 The script has to be placed in the base folder of your sectorfile (where .ese, .sct, .rwy files are located).
 
-Run the script either via terminal or via the provided .bat file.
+Run the script via the provided bat file, alternatively manually via terminal.
 
 If any of the following conditions are met at ENGM, the script will promt you to select a runway manually:
 - Low temprature
