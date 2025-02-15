@@ -1,182 +1,190 @@
 #!/usr/bin/env python3
 
-import requests
 import math
-import re
-from datetime import datetime
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Set, Tuple, Union, override
 import os
-import json
-from dataclasses import dataclass
+import csv
 from airport_config import PREFERRED_RUNWAYS, IGNORED_AIRPORTS
+from datetime import datetime
 import termcolor
+import requests
+
+import re
+
+from weather import Metar, fetch_metar
+
+_vatsim_atis_cache: Dict[str, Tuple[datetime, Dict]] = {}
+
+def get_atis_runways(icao: str) -> Tuple[List[str], List[str]]:
+    """Get active runways from ATIS."""
+    url = 'https://data.vatsim.net/v3/vatsim-data.json'
+    now = datetime.now()
+    if icao in _vatsim_atis_cache and (now - _vatsim_atis_cache[icao][0]).seconds < 300:
+        data = _vatsim_atis_cache[icao][1]
+    else:
+        data = requests.get(url).json()
+        _vatsim_atis_cache[icao] = (now, data)
+
+    arrival_runways = []
+    departure_runways = []
+    for atis in data['atis'].values():
+        if atis['callsign'].startswith(icao):
+            arr, dep = get_runway_config_from_atis(' '.join(atis['text_atis']))
+            arrival_runways.extend(arr)
+            departure_runways.extend(dep)
+    return arrival_runways, departure_runways
+
+SINGLE_RUNWAY = re.compile(r'RUNWAY IN USE ([0-9]{2}[LRC]*)')
+ARRIVAL_RUNWAY = re.compile(r'APPROACH RUNWAY ([0-9]{2}[LRC]*)')
+DEPARTURE_RUNWAY = re.compile(r'DEPARTURE RUNWAY ([0-9]{2}[LRC]*)')
+MULTI_RUNWAY = re.compile(r'RUNWAYS ([0-9]{2}[LRC]*) AND ([0-9]{2}[LRC]*) IN USE')
+def get_runway_config_from_atis(atis: str) -> Tuple[List[str], List[str]]:
+    arrival_runways = []
+    departure_runways = []
+
+    single_runway_match = SINGLE_RUNWAY.search(atis)
+    if single_runway_match:
+        arrival_runways.append(single_runway_match.group(1))
+        departure_runways.append(single_runway_match.group(1))
+
+    arrival_runway_match = ARRIVAL_RUNWAY.search(atis)
+    if arrival_runway_match:
+        arrival_runways.append(arrival_runway_match.group(1))
+
+    departure_runway_match = DEPARTURE_RUNWAY.search(atis)
+    if departure_runway_match:
+        departure_runways.append(departure_runway_match.group(1))
+
+    multi_runway_match = MULTI_RUNWAY.search(atis)
+    if multi_runway_match:
+        arrival_runways.append(multi_runway_match.group(1))
+        arrival_runways.append(multi_runway_match.group(2))
+        departure_runways.append(multi_runway_match.group(1))
+        departure_runways.append(multi_runway_match.group(2))
+
+    if len(arrival_runways) == 0 or len(departure_runways) == 0:
+        print('Unable to find runway in ATIS')
+
+    return arrival_runways, departure_runways
 
 # Helper function for colored text using termcolor
 def c(text: str, color: str, attrs: List[str] = None) -> str:
     return termcolor.colored(text, color, attrs=attrs)
 
+class Runway:
+    """Class to store runway data."""
+    identifiers: Tuple[str, str]
+    headings: Tuple[int, int]
+
+    def __init__(self, identifiers: Tuple[str, str], headings: Tuple[int, int]):
+        self.identifiers = identifiers
+        self.headings = headings
+
+    def find_best_runway(self, metar: Metar):
+        candiates: Dict[str, int] = {}
+        for runway, direction in zip(self.identifiers, self.headings):
+            headwind = metar.wind.get_max_headwind_component(direction);
+            candiates[runway] = headwind
+        if max(candiates.values()) > 5:
+            return max(candiates, key=candiates.get)
+        elif max(candiates.values()) > 2:
+            candidate = max(candiates, key=candiates.get)
+        # TODO: Take LVP into account
+        return candidate
+
+
 class Airport:
     """Class to store runway data for an airport."""
-    def __init__(self, rwy1: str, rwy2: str, hdg1: int, hdg2: int, airport: str):
-        self.rwy1 = rwy1
-        self.rwy2 = rwy2
-        self.hdg1 = hdg1
-        self.hdg2 = hdg2
-        self.airport = airport
 
-def parse_runways(filename: str) -> Dict[str, List[Airport]]:
-    runways = {}
-    with open(filename, 'r') as f:
-        for line in f:
-            if line.strip() and not line.startswith('['):
-                parts = line.strip().split()
-                if len(parts) >= 9:
-                    airport = parts[8]
-                    # Note: The Airport __init__ now expects 5 arguments.
-                    runway = Airport(parts[0], parts[1], int(parts[2]), int(parts[3]), airport)
-                    if airport not in runways:
-                        runways[airport] = []
-                    runways[airport].append(runway)
-    return runways
+    identifier: str
+    runway: Runway
+    arrival_runways_in_use: List[str]
 
-def parse_metar(metar: str) -> dict:
-    """Parse METAR string to extract wind information.
 
-    Args:
-        metar: Raw METAR string
+    def __init__(self, airport: str):
+        self.identifier = airport
 
-    Returns:
-        Dictionary containing:
-        - direction: wind direction in degrees or 'VRB' for variable
-        - speed: wind speed in knots
-        - raw_metar: original METAR string
-        - visibility: visibility in meters (if available)
-        - temperature: temperature in Celsius
-        - has_rvr: True if RVR is reported
-        - has_snow: True if snow is reported
-        - low_clouds: True if BKN or OVC at or below 200ft
+    def set_runway(self, runway: Runway):
+        self.runway = runway
 
-    Returns None if parsing fails.
-    """
-    try:
-        parts = metar.split()
-        wind_data = {'raw_metar': metar}
+    def get_runway_in_use_from_atis(self) -> Tuple:
 
-        # Find wind information
-        for part in parts:
-            if 'KT' in part and not part.startswith('Q'):
-                if part.startswith('VRB'):
-                    wind_data['direction'] = 'VRB'
-                    wind_data['speed'] = int(part[3:5])
-                else:
-                    wind_data['direction'] = int(part[0:3])
-                    wind_data['speed'] = int(part[3:5])
-                break
 
-        # Extract visibility (look for it after the wind part)
-        for i, part in enumerate(parts):
-            if 'KT' in part:
-                if i + 1 < len(parts):
-                    next_part = parts[i + 1]
-                    if next_part.isdigit():
-                        wind_data['visibility'] = int(next_part)
-                    elif next_part == '9999':
-                        wind_data['visibility'] = 9999
-                break
 
-        # Check for RVR (R followed by runway number)
-        wind_data['has_rvr'] = any(p.startswith('R') and len(p) > 3 and p[1:3].isdigit() for p in parts)
+    def get_metar(self) -> Metar:
+        metar = fetch_metar(self.identifier)
+        if metar is None:
+            raise ValueError("No METAR data available")
+        return metar
 
-        # Extract temperature
-        for part in parts:
-            if '/' in part and not part.startswith('Q'):
-                temp_str = part.split('/')[0]
-                if temp_str.startswith('M'):
-                    wind_data['temperature'] = -int(temp_str[1:])
-                else:
-                    try:
-                        wind_data['temperature'] = int(temp_str)
-                    except ValueError:
-                        continue
-                break
+    def get_default_runway(self):
+        runway = PREFERRED_RUNWAYS.get(self.identifier)
+        return runway
 
-        # Check for snow conditions
-        snow_conditions = {'SN', 'SNRA', 'SHSN', 'RASN', '-SN', '+SN'}
-        wind_data['has_snow'] = any(cond in parts for cond in snow_conditions)
+    def select_runway(self):
+        try:
+            metar = self.get_metar()
+        except Exception as e:
+            return self.get_default_runway()
 
-        # Check for low cloud layers (BKN or OVC at or below 200ft)
-        wind_data['low_clouds'] = False
-        for part in parts:
-            if part.startswith(('BKN', 'OVC')):
-                try:
-                    height = int(part[3:6])
-                    if height <= 2:
-                        wind_data['low_clouds'] = True
-                        break
-                except ValueError:
-                    continue
+        return self.runway.find_best_runway(metar) or self.get_default_runway()
 
-        return wind_data if 'direction' in wind_data and 'speed' in wind_data else None
+class ENGM(Airport):
+    runways: Dict[str, Runway]
 
-    except Exception as e:
-        print(f"Error parsing METAR: {e}")
-        return None
+    @override
+    def set_runway(self, runway: Runway):
+        self.runways[min(runway.identifiers)] = runway
 
-def get_all_metars() -> Dict[str, dict]:
-    metars = {}
-    try:
-        # Get all Norwegian METARs
-        response = requests.get('https://metar.vatsim.net/EN')
-        if response.status_code == 200:
-            norwegian_metars = response.text.strip().split('\n')
-            for metar in norwegian_metars:
-                icao = metar.split()[0]
-                wind_data = parse_metar(metar)
-                if wind_data:
-                    metars[icao] = wind_data
+    @override
+    def select_runway(self):
+        return super().select_runway()
 
-        # Get ESKS METAR separately
-        response = requests.get('https://metar.vatsim.net/metar.php?id=ESKS')
-        if response.status_code == 200:
-            metar = response.text.strip()
-            wind_data = parse_metar(metar)
-            if wind_data:
-                metars['ESKS'] = wind_data
+class ENZV(Airport):
+    runways: Dict[str, Runway]
 
-    except Exception as e:
-        print(f"Error fetching METARs: {e}")
+    @override
+    def set_runway(self, runway: Runway):
+        self.runways[min(runway.identifiers)] = runway
 
-    return metars
-
-def calculate_wind_components(runway_hdg: int, wind_dir: int | str, wind_speed: int) -> Tuple[float, float]:
-    try:
-        # Handle variable winds
-        if isinstance(wind_dir, str) and wind_dir == 'VRB':
-            return 0, wind_speed
-
-        # Normalize relative angle to -180...+180 degrees
-        relative_angle = ((wind_dir - runway_hdg + 180 + 360) % 360) - 180
-
-        headwind = wind_speed * math.cos(math.radians(relative_angle))
-        crosswind = abs(wind_speed * math.sin(math.radians(relative_angle)))
-
-        return headwind, crosswind
-
-    except Exception as e:
-        print(f"Error calculating wind components: {e}")
-        return 0, 0
-
-def format_wind_info(direction: str, speed: Union[int, str]) -> str:
-    """Return formatted wind info with color using termcolor."""
-    try:
-        speed_int = int(speed) if isinstance(speed, str) else speed
-        if direction == 'VRB':
-            return c(f"VRB{speed_int:02d}KT", "green")
+    @override
+    def select_runway(self):
+        try:
+            metar = self.get_metar()
+        except Exception as e:
+            return self.get_default_runway()
+        main_crosswind = metar.wind.get_max_crosswind_component(self.runways['18'].headings[0])
+        if main_crosswind > 15:
+            self.main_runway = self.runways['18'].find_best_runway(metar)
+            if main_crosswind < 10:
+                self.secondary_runway = self.runways['10'].find_best_runway(metar)
         else:
-            color = "green" if speed_int < 10 else "yellow" if speed_int < 20 else "red"
-            return c(f"{direction:03d}@{speed_int:02d}KT", color)
-    except (ValueError, TypeError):
-        return c(f"{direction}@{speed}KT", "yellow")
+            self.main_runway = self.runways['10'].find_best_runway(metar)
+
+
+class AirportDefaultDict(dict):
+    def __missing__(self, key):
+        # When the key is missing, create a new Airport with the key as its identifier.
+        if key == 'ENGM':
+            return ENGM(key)
+        elif key == 'ENZV':
+            return ENZV(key)
+        else:
+            return Airport(key)
+
+def parse_airports(filename: str) -> Dict[str, Airport]:
+    airports = AirportDefaultDict()
+    with open(filename, 'r') as f:
+        f.readline()  # Skip header
+        runways = csv.reader(f, delimiter=' ')
+        for runway_row in runways:
+            icao = runway_row[8]
+            airport: Airport = airports[icao]
+            identifiers = (runway_row[0], runway_row[1])
+            headings = (int(runway_row[2]), int(runway_row[3]))
+            runway = Runway(identifiers, headings)
+            airport.set_runway(runway)
+    return airports
 
 def select_runway_enzv(wind_data: dict) -> Tuple[str, str, bool]:
     """Special case for ENZV which has two runway pairs."""
@@ -425,12 +433,17 @@ def update_rwy_file(filename: str, airport: str, runway: str):
         f.truncate()
 
 def main():
+    airports = parse_airports('runway.txt')
+    for airport in airports:
+        airport.select_runway()
+
+def main_old():
     try:
         # Get METARs for all airports
         all_metars = get_all_metars()
 
         # Parse runway data
-        runways = parse_runways('runway.txt')
+        runways = parse_airports('runway.txt')
 
         # Get list of .rwy files in current directory
         rwy_files = [file for file in os.listdir() if file.endswith('.rwy')]
